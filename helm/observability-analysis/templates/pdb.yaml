@@ -1,0 +1,39 @@
+{{- if and .Values.server.enabled .Values.server.podDisruptionBudget.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "observability-analysis.fullname" . }}-server
+  namespace: {{ include "observability-analysis.namespace" . }}
+  labels:
+    {{- include "observability-analysis.labels" . | nindent 4 }}
+    app.kubernetes.io/component: server
+spec:
+  {{- if .Values.server.podDisruptionBudget.minAvailable }}
+  minAvailable: {{ .Values.server.podDisruptionBudget.minAvailable }}
+  {{- else if .Values.server.podDisruptionBudget.maxUnavailable }}
+  maxUnavailable: {{ .Values.server.podDisruptionBudget.maxUnavailable }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "observability-analysis.serverSelectorLabels" . | nindent 6 }}
+{{- end }}
+---
+{{- if and .Values.worker.enabled .Values.worker.podDisruptionBudget.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "observability-analysis.fullname" . }}-worker
+  namespace: {{ include "observability-analysis.namespace" . }}
+  labels:
+    {{- include "observability-analysis.labels" . | nindent 4 }}
+    app.kubernetes.io/component: worker
+spec:
+  {{- if .Values.worker.podDisruptionBudget.minAvailable }}
+  minAvailable: {{ .Values.worker.podDisruptionBudget.minAvailable }}
+  {{- else if .Values.worker.podDisruptionBudget.maxUnavailable }}
+  maxUnavailable: {{ .Values.worker.podDisruptionBudget.maxUnavailable }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "observability-analysis.workerSelectorLabels" . | nindent 6 }}
+{{- end }}

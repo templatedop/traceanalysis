@@ -1,0 +1,133 @@
+Thank you for installing {{ .Chart.Name }}!
+
+Your release is named: {{ .Release.Name }}
+Namespace: {{ include "observability-analysis.namespace" . }}
+
+=============================================================================
+GETTING STARTED
+=============================================================================
+
+{{- if .Values.server.enabled }}
+
+1. Get the application URL:
+{{- if .Values.server.ingress.enabled }}
+{{- range $host := .Values.server.ingress.hosts }}
+  http{{ if $.Values.server.ingress.tls }}s{{ end }}://{{ $host.host }}{{ (first $host.paths).path }}
+{{- end }}
+{{- else if contains "NodePort" .Values.server.service.type }}
+  export NODE_PORT=$(kubectl get --namespace {{ include "observability-analysis.namespace" . }} -o jsonpath="{.spec.ports[0].nodePort}" services {{ include "observability-analysis.fullname" . }})
+  export NODE_IP=$(kubectl get nodes --namespace {{ include "observability-analysis.namespace" . }} -o jsonpath="{.items[0].status.addresses[0].address}")
+  echo http://$NODE_IP:$NODE_PORT
+{{- else if contains "LoadBalancer" .Values.server.service.type }}
+  NOTE: It may take a few minutes for the LoadBalancer IP to be available.
+  You can watch the status with:
+    kubectl get --namespace {{ include "observability-analysis.namespace" . }} svc -w {{ include "observability-analysis.fullname" . }}
+  export SERVICE_IP=$(kubectl get svc --namespace {{ include "observability-analysis.namespace" . }} {{ include "observability-analysis.fullname" . }} --template "{{"{{ range (index .status.loadBalancer.ingress 0) }}{{.}}{{ end }}"}}")
+  echo http://$SERVICE_IP:{{ .Values.server.service.port }}
+{{- else if contains "ClusterIP" .Values.server.service.type }}
+  kubectl --namespace {{ include "observability-analysis.namespace" . }} port-forward svc/{{ include "observability-analysis.fullname" . }} 8080:{{ .Values.server.service.port }}
+  echo "Visit http://127.0.0.1:8080 to access the API"
+{{- end }}
+
+2. Check deployment status:
+  kubectl --namespace {{ include "observability-analysis.namespace" . }} get pods -l "app.kubernetes.io/name={{ include "observability-analysis.name" . }}"
+
+3. View logs:
+  kubectl --namespace {{ include "observability-analysis.namespace" . }} logs -l "app.kubernetes.io/name={{ include "observability-analysis.name" . }}" -f
+
+{{- end }}
+
+=============================================================================
+API ENDPOINTS
+=============================================================================
+
+- Health Check: GET /health
+- Readiness Check: GET /ready
+- Features Info: GET /api/v1/features
+- Analyze: POST /api/v1/analyze
+- Natural Language Query: POST /api/v1/query
+{{- if .Values.config.features.enableRAG }}
+- RAG Query: POST /api/v1/knowledge/query
+- RAG Add Document: POST /api/v1/knowledge/add
+- RAG Stats: GET /api/v1/knowledge/stats
+{{- end }}
+{{- if .Values.config.features.enableTemporal }}
+- Incident Analysis: POST /api/v1/analyze/incident
+- Analysis Status: GET /api/v1/analyze/status?workflow_id=<id>
+- Start Monitoring: POST /api/v1/monitor/start
+- Stop Monitoring: POST /api/v1/monitor/stop?workflow_id=<id>
+{{- end }}
+{{- if .Values.config.features.enableMetrics }}
+- Metrics: GET {{ .Values.config.metrics.path }}
+{{- end }}
+
+=============================================================================
+ENABLED FEATURES
+=============================================================================
+
+- Temporal Workflows: {{ .Values.config.features.enableTemporal }}
+- RAG (Vector Store): {{ .Values.config.features.enableRAG }}
+- LLM Caching: {{ .Values.config.features.enableCaching }}
+- Prometheus Metrics: {{ .Values.config.features.enableMetrics }}
+- Alerting: {{ .Values.config.features.enableAlerting }}
+- Predictions: {{ .Values.config.features.enablePredictions }}
+
+=============================================================================
+CONFIGURATION
+=============================================================================
+
+LLM Provider: {{ .Values.config.llm.provider }}
+LLM Model: {{ .Values.config.llm.defaultModel }}
+Vector Store: {{ .Values.config.rag.vectorStore.type }}
+
+{{- if not .Values.secrets.llmApiKey }}
+
+⚠️  WARNING: No LLM API key was provided!
+If using OpenAI, Anthropic, or other cloud providers, set:
+  --set secrets.llmApiKey=<your-api-key>
+
+Or use an existing secret:
+  --set secrets.existingSecret=<secret-name>
+  --set secrets.existingSecretKey=<key-in-secret>
+
+{{- end }}
+
+=============================================================================
+SCALING
+=============================================================================
+
+{{- if .Values.server.autoscaling.enabled }}
+Server autoscaling is enabled:
+  - Min replicas: {{ .Values.server.autoscaling.minReplicas }}
+  - Max replicas: {{ .Values.server.autoscaling.maxReplicas }}
+  - CPU threshold: {{ .Values.server.autoscaling.targetCPUUtilizationPercentage }}%
+{{- else }}
+Server replicas: {{ .Values.server.replicaCount }}
+{{- end }}
+
+{{- if .Values.worker.enabled }}
+{{- if .Values.worker.autoscaling.enabled }}
+Worker autoscaling is enabled:
+  - Min replicas: {{ .Values.worker.autoscaling.minReplicas }}
+  - Max replicas: {{ .Values.worker.autoscaling.maxReplicas }}
+  - CPU threshold: {{ .Values.worker.autoscaling.targetCPUUtilizationPercentage }}%
+{{- else }}
+Worker replicas: {{ .Values.worker.replicaCount }}
+{{- end }}
+{{- end }}
+
+=============================================================================
+GRACEFUL SHUTDOWN
+=============================================================================
+
+Shutdown timeout: {{ .Values.config.server.shutdownTimeout }}
+Drain timeout: {{ .Values.config.server.drainTimeout }}
+
+The application handles SIGTERM gracefully and will:
+1. Stop accepting new requests
+2. Wait for in-flight requests to complete
+3. Close all connections and resources
+
+=============================================================================
+
+For more information, visit the project documentation.

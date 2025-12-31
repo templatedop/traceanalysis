@@ -1,0 +1,161 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "observability-analysis.configMapName" . }}
+  namespace: {{ include "observability-analysis.namespace" . }}
+  labels:
+    {{- include "observability-analysis.labels" . | nindent 4 }}
+  {{- with .Values.commonAnnotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+data:
+  config.yaml: |
+    # Feature flags
+    features:
+      enable_temporal: {{ .Values.config.features.enableTemporal }}
+      enable_rag: {{ .Values.config.features.enableRAG }}
+      enable_caching: {{ .Values.config.features.enableCaching }}
+      enable_metrics: {{ .Values.config.features.enableMetrics }}
+      enable_alerting: {{ .Values.config.features.enableAlerting }}
+      enable_predictions: {{ .Values.config.features.enablePredictions }}
+
+    # Server settings
+    server:
+      host: {{ .Values.config.server.host | quote }}
+      port: {{ .Values.config.server.port }}
+      read_timeout: {{ .Values.config.server.readTimeout }}
+      write_timeout: {{ .Values.config.server.writeTimeout }}
+      idle_timeout: {{ .Values.config.server.idleTimeout }}
+      shutdown_timeout: {{ .Values.config.server.shutdownTimeout }}
+      drain_timeout: {{ .Values.config.server.drainTimeout }}
+
+    # Temporal settings
+    temporal:
+      host_port: {{ .Values.config.temporal.hostPort | quote }}
+      namespace: {{ .Values.config.temporal.namespace | quote }}
+      task_queue: {{ .Values.config.temporal.taskQueue | quote }}
+      worker_count: {{ .Values.config.temporal.workerCount }}
+      max_concurrent: {{ .Values.config.temporal.maxConcurrent }}
+      workflow_timeout: {{ .Values.config.temporal.workflowTimeout }}
+      activity_timeout: {{ .Values.config.temporal.activityTimeout }}
+      retry_max_attempts: {{ .Values.config.temporal.retryMaxAttempts }}
+      retry_initial_interval: {{ .Values.config.temporal.retryInitialInterval }}
+
+    # LLM settings
+    llm:
+      provider: {{ .Values.config.llm.provider | quote }}
+      default_model: {{ .Values.config.llm.defaultModel | quote }}
+      base_url: {{ .Values.config.llm.baseUrl | quote }}
+      timeout: {{ .Values.config.llm.timeout }}
+      max_retries: {{ .Values.config.llm.maxRetries }}
+      temperature: {{ .Values.config.llm.temperature }}
+      max_tokens: {{ .Values.config.llm.maxTokens }}
+      rate_limit_rpm: {{ .Values.config.llm.rateLimitRpm }}
+
+    # RAG settings
+    rag:
+      vector_store:
+        type: {{ .Values.config.rag.vectorStore.type | quote }}
+        host: {{ .Values.config.rag.vectorStore.host | quote }}
+        port: {{ .Values.config.rag.vectorStore.port }}
+        collection: {{ .Values.config.rag.vectorStore.collection | quote }}
+        dimension: {{ .Values.config.rag.vectorStore.dimension }}
+      embedding_model: {{ .Values.config.rag.embeddingModel | quote }}
+      embedding_provider: {{ .Values.config.rag.embeddingProvider | quote }}
+      embedding_dim: {{ .Values.config.rag.embeddingDim }}
+      chunk_size: {{ .Values.config.rag.chunkSize }}
+      chunk_overlap: {{ .Values.config.rag.chunkOverlap }}
+      top_k: {{ .Values.config.rag.topK }}
+      min_score: {{ .Values.config.rag.minScore }}
+      knowledge_base_path: {{ .Values.config.rag.knowledgeBasePath | quote }}
+      index_on_startup: {{ .Values.config.rag.indexOnStartup }}
+
+    # Caching settings
+    caching:
+      max_entries: {{ .Values.config.caching.maxEntries }}
+      ttl: {{ .Values.config.caching.ttl }}
+      cleanup_interval: {{ .Values.config.caching.cleanupInterval }}
+
+    # Collectors
+    collectors:
+      prometheus:
+        enabled: {{ .Values.config.collectors.prometheus.enabled }}
+        url: {{ .Values.config.collectors.prometheus.url | quote }}
+        timeout: {{ .Values.config.collectors.prometheus.timeout }}
+      jaeger:
+        enabled: {{ .Values.config.collectors.jaeger.enabled }}
+        query_url: {{ .Values.config.collectors.jaeger.queryUrl | quote }}
+        timeout: {{ .Values.config.collectors.jaeger.timeout }}
+      loki:
+        enabled: {{ .Values.config.collectors.loki.enabled }}
+        url: {{ .Values.config.collectors.loki.url | quote }}
+        timeout: {{ .Values.config.collectors.loki.timeout }}
+      tempo:
+        enabled: {{ .Values.config.collectors.tempo.enabled }}
+        url: {{ .Values.config.collectors.tempo.url | quote }}
+        timeout: {{ .Values.config.collectors.tempo.timeout }}
+      otel:
+        enabled: {{ .Values.config.collectors.otel.enabled }}
+        grpc_endpoint: {{ .Values.config.collectors.otel.grpcEndpoint | quote }}
+        http_endpoint: {{ .Values.config.collectors.otel.httpEndpoint | quote }}
+
+    # Agents
+    agents:
+      trace:
+        enabled: {{ .Values.config.agents.trace.enabled }}
+        timeout: {{ .Values.config.agents.trace.timeout }}
+        max_retries: {{ .Values.config.agents.trace.maxRetries }}
+        concurrency: {{ .Values.config.agents.trace.concurrency }}
+      metric:
+        enabled: {{ .Values.config.agents.metric.enabled }}
+        timeout: {{ .Values.config.agents.metric.timeout }}
+        max_retries: {{ .Values.config.agents.metric.maxRetries }}
+        concurrency: {{ .Values.config.agents.metric.concurrency }}
+      log:
+        enabled: {{ .Values.config.agents.log.enabled }}
+        timeout: {{ .Values.config.agents.log.timeout }}
+        max_retries: {{ .Values.config.agents.log.maxRetries }}
+        concurrency: {{ .Values.config.agents.log.concurrency }}
+
+    # Analysis settings
+    analysis:
+      default_time_range: {{ .Values.config.analysis.defaultTimeRange }}
+      max_traces: {{ .Values.config.analysis.maxTraces }}
+      max_logs: {{ .Values.config.analysis.maxLogs }}
+      anomaly_threshold: {{ .Values.config.analysis.anomalyThreshold }}
+      forecasting:
+        enabled: {{ .Values.config.analysis.forecasting.enabled }}
+        horizon: {{ .Values.config.analysis.forecasting.horizon }}
+        min_data_points: {{ .Values.config.analysis.forecasting.minDataPoints }}
+        confidence_level: {{ .Values.config.analysis.forecasting.confidenceLevel }}
+
+    # Alerting settings
+    alerting:
+      enabled: {{ .Values.config.alerting.enabled }}
+      slack:
+        enabled: {{ .Values.config.alerting.slack.enabled }}
+        webhook_url: {{ .Values.config.alerting.slack.webhookUrl | quote }}
+        channel: {{ .Values.config.alerting.slack.channel | quote }}
+      pagerduty:
+        enabled: {{ .Values.config.alerting.pagerduty.enabled }}
+        routing_key: {{ .Values.config.alerting.pagerduty.routingKey | quote }}
+      webhook:
+        enabled: {{ .Values.config.alerting.webhook.enabled }}
+        url: {{ .Values.config.alerting.webhook.url | quote }}
+        {{- if .Values.config.alerting.webhook.headers }}
+        headers:
+          {{- toYaml .Values.config.alerting.webhook.headers | nindent 10 }}
+        {{- end }}
+
+    # Metrics settings
+    metrics:
+      path: {{ .Values.config.metrics.path | quote }}
+      namespace: {{ .Values.config.metrics.namespace | quote }}
+      subsystem: {{ .Values.config.metrics.subsystem | quote }}
+
+    # Logging settings
+    logging:
+      level: {{ .Values.config.logging.level | quote }}
+      format: {{ .Values.config.logging.format | quote }}
+      output: {{ .Values.config.logging.output | quote }}

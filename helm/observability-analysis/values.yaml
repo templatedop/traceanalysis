@@ -1,0 +1,424 @@
+# Default values for observability-analysis
+# This is a YAML-formatted file.
+
+# Global settings
+global:
+  imageRegistry: ""
+  imagePullSecrets: []
+
+# Common labels to add to all resources
+commonLabels: {}
+
+# Common annotations to add to all resources
+commonAnnotations: {}
+
+# Namespace to deploy to (uses Release.Namespace if not set)
+namespace: ""
+
+# ============================================================================
+# SERVER CONFIGURATION
+# ============================================================================
+server:
+  enabled: true
+
+  replicaCount: 2
+
+  image:
+    repository: observability-analysis
+    tag: ""  # Defaults to Chart appVersion
+    pullPolicy: IfNotPresent
+    # Use specific target if multi-stage build
+    # target: server
+
+  # Command and args override
+  command: []
+  args:
+    - "--config=/app/config/config.yaml"
+
+  # Service configuration
+  service:
+    type: ClusterIP
+    port: 80
+    targetPort: 8080
+    annotations: {}
+
+  # Ingress configuration
+  ingress:
+    enabled: false
+    className: nginx
+    annotations: {}
+      # kubernetes.io/ingress.class: nginx
+      # nginx.ingress.kubernetes.io/proxy-body-size: "50m"
+      # nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
+    hosts:
+      - host: observability-analysis.local
+        paths:
+          - path: /
+            pathType: Prefix
+    tls: []
+    #  - secretName: observability-analysis-tls
+    #    hosts:
+    #      - observability-analysis.local
+
+  # Resource limits
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 1000m
+      memory: 1Gi
+
+  # Probes
+  livenessProbe:
+    enabled: true
+    httpGet:
+      path: /health
+      port: http
+    initialDelaySeconds: 10
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 3
+
+  readinessProbe:
+    enabled: true
+    httpGet:
+      path: /ready
+      port: http
+    initialDelaySeconds: 5
+    periodSeconds: 5
+    timeoutSeconds: 3
+    failureThreshold: 3
+
+  # Autoscaling
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
+    targetMemoryUtilizationPercentage: 80
+
+  # Pod disruption budget
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
+    # maxUnavailable: 1
+
+  # Node selector
+  nodeSelector: {}
+
+  # Tolerations
+  tolerations: []
+
+  # Affinity
+  affinity: {}
+
+  # Pod annotations
+  podAnnotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "8080"
+    prometheus.io/path: "/metrics"
+
+  # Pod security context
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 1000
+    fsGroup: 1000
+
+  # Container security context
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop:
+        - ALL
+
+  # Extra environment variables
+  extraEnv: []
+
+  # Extra volume mounts
+  extraVolumeMounts: []
+
+  # Extra volumes
+  extraVolumes: []
+
+  # Termination grace period (should match shutdown timeout)
+  terminationGracePeriodSeconds: 45
+
+# ============================================================================
+# WORKER CONFIGURATION
+# ============================================================================
+worker:
+  enabled: true
+
+  replicaCount: 3
+
+  image:
+    repository: observability-analysis
+    tag: ""  # Defaults to Chart appVersion
+    pullPolicy: IfNotPresent
+
+  # Command override for worker
+  command:
+    - worker
+  args:
+    - "--config=/app/config/config.yaml"
+
+  # Resource limits (workers typically need more resources)
+  resources:
+    requests:
+      cpu: 200m
+      memory: 512Mi
+    limits:
+      cpu: 2000m
+      memory: 2Gi
+
+  # Autoscaling
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 20
+    targetCPUUtilizationPercentage: 70
+
+  # Pod disruption budget
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
+
+  # Node selector
+  nodeSelector: {}
+
+  # Tolerations
+  tolerations: []
+
+  # Affinity
+  affinity: {}
+
+  # Pod annotations
+  podAnnotations: {}
+
+  # Pod security context
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 1000
+    fsGroup: 1000
+
+  # Container security context
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop:
+        - ALL
+
+  # Extra environment variables
+  extraEnv: []
+
+  # Extra volume mounts
+  extraVolumeMounts: []
+
+  # Extra volumes
+  extraVolumes: []
+
+  # Termination grace period
+  terminationGracePeriodSeconds: 45
+
+# ============================================================================
+# SERVICE ACCOUNT
+# ============================================================================
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+  automountServiceAccountToken: false
+
+# ============================================================================
+# PERSISTENT STORAGE
+# ============================================================================
+persistence:
+  enabled: true
+  storageClassName: ""
+  accessModes:
+    - ReadWriteMany
+  size: 10Gi
+  annotations: {}
+  # existingClaim: ""
+
+# ============================================================================
+# APPLICATION CONFIGURATION
+# ============================================================================
+config:
+  # Feature flags
+  features:
+    enableTemporal: true
+    enableRAG: true
+    enableCaching: true
+    enableMetrics: true
+    enableAlerting: false
+    enablePredictions: true
+
+  # Server settings
+  server:
+    host: "0.0.0.0"
+    port: 8080
+    readTimeout: 30s
+    writeTimeout: 30s
+    idleTimeout: 120s
+    shutdownTimeout: 30s
+    drainTimeout: 10s
+
+  # Temporal settings
+  temporal:
+    hostPort: "temporal-frontend:7233"
+    namespace: "default"
+    taskQueue: "observability-analysis"
+    workerCount: 4
+    maxConcurrent: 10
+    workflowTimeout: 10m
+    activityTimeout: 5m
+    retryMaxAttempts: 3
+    retryInitialInterval: 1s
+
+  # LLM settings
+  llm:
+    provider: "ollama"
+    defaultModel: "qwen2.5:32b"
+    baseUrl: "http://ollama:11434"
+    timeout: 5m
+    maxRetries: 3
+    temperature: 0.1
+    maxTokens: 4096
+    rateLimitRpm: 60
+
+  # RAG settings
+  rag:
+    vectorStore:
+      type: "qdrant"
+      host: "qdrant"
+      port: 6333
+      collection: "observability"
+      dimension: 768
+    embeddingModel: "nomic-embed-text"
+    embeddingProvider: "ollama"
+    embeddingDim: 768
+    chunkSize: 1000
+    chunkOverlap: 200
+    topK: 5
+    minScore: 0.7
+    knowledgeBasePath: "/app/knowledge"
+    indexOnStartup: true
+
+  # Caching settings
+  caching:
+    maxEntries: 1000
+    ttl: 1h
+    cleanupInterval: 5m
+
+  # Collectors
+  collectors:
+    prometheus:
+      enabled: true
+      url: "http://prometheus:9090"
+      timeout: 30s
+    jaeger:
+      enabled: true
+      queryUrl: "http://jaeger-query:16686"
+      timeout: 30s
+    loki:
+      enabled: true
+      url: "http://loki:3100"
+      timeout: 30s
+    tempo:
+      enabled: false
+      url: ""
+      timeout: 30s
+    otel:
+      enabled: false
+      grpcEndpoint: ""
+      httpEndpoint: ""
+
+  # Agents
+  agents:
+    trace:
+      enabled: true
+      timeout: 2m
+      maxRetries: 3
+      concurrency: 5
+    metric:
+      enabled: true
+      timeout: 2m
+      maxRetries: 3
+      concurrency: 5
+    log:
+      enabled: true
+      timeout: 2m
+      maxRetries: 3
+      concurrency: 5
+
+  # Analysis settings
+  analysis:
+    defaultTimeRange: 1h
+    maxTraces: 1000
+    maxLogs: 10000
+    anomalyThreshold: 3.0
+    forecasting:
+      enabled: true
+      horizon: 24h
+      minDataPoints: 100
+      confidenceLevel: 0.95
+
+  # Alerting settings
+  alerting:
+    enabled: false
+    slack:
+      enabled: false
+      webhookUrl: ""
+      channel: ""
+    pagerduty:
+      enabled: false
+      routingKey: ""
+    webhook:
+      enabled: false
+      url: ""
+      headers: {}
+
+  # Metrics settings
+  metrics:
+    path: "/metrics"
+    namespace: "observability_analysis"
+    subsystem: "framework"
+
+  # Logging settings
+  logging:
+    level: "info"
+    format: "json"
+    output: "stdout"
+
+# ============================================================================
+# SECRETS
+# ============================================================================
+secrets:
+  # LLM API key (required for OpenAI, Anthropic, etc.)
+  llmApiKey: ""
+  # Create secret or use existing
+  existingSecret: ""
+  # Key in the existing secret
+  existingSecretKey: "llm-api-key"
+
+# ============================================================================
+# ADDITIONAL COMPONENTS
+# ============================================================================
+
+# Network policies
+networkPolicy:
+  enabled: false
+  ingress: []
+  egress: []
+
+# Pod priority class
+priorityClassName: ""
+
+# Topology spread constraints
+topologySpreadConstraints: []
