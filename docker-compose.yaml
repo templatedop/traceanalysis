@@ -1,0 +1,181 @@
+version: '3.8'
+
+services:
+  # Temporal server
+  temporal:
+    image: temporalio/auto-setup:latest
+    ports:
+      - "7233:7233"
+      - "8233:8233"  # Web UI
+    environment:
+      - DB=postgresql
+      - DB_PORT=5432
+      - POSTGRES_USER=temporal
+      - POSTGRES_PWD=temporal
+      - POSTGRES_SEEDS=postgres
+      - DYNAMIC_CONFIG_FILE_PATH=/etc/temporal/config/dynamicconfig/development.yaml
+    depends_on:
+      - postgres
+    volumes:
+      - ./deploy/temporal/dynamicconfig:/etc/temporal/config/dynamicconfig
+    networks:
+      - observability
+
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: temporal
+      POSTGRES_PASSWORD: temporal
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - observability
+
+  # Temporal UI
+  temporal-ui:
+    image: temporalio/ui:latest
+    ports:
+      - "8080:8080"
+    environment:
+      - TEMPORAL_ADDRESS=temporal:7233
+    depends_on:
+      - temporal
+    networks:
+      - observability
+
+  # Qdrant vector database
+  qdrant:
+    image: qdrant/qdrant:latest
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    networks:
+      - observability
+
+  # Ollama for local LLM
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    networks:
+      - observability
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  # API Server
+  server:
+    build:
+      context: .
+      target: server
+    ports:
+      - "8081:8080"
+    environment:
+      - TEMPORAL_HOST=temporal:7233
+      - LLM_BASE_URL=http://ollama:11434
+      - LLM_MODEL=qwen2.5:32b
+      - PROMETHEUS_URL=http://prometheus:9090
+      - JAEGER_URL=http://jaeger:16686
+      - LOKI_URL=http://loki:3100
+    volumes:
+      - ./config.yaml:/app/config.yaml
+      - ./knowledge:/app/knowledge
+    depends_on:
+      - temporal
+      - ollama
+      - qdrant
+    networks:
+      - observability
+    restart: unless-stopped
+
+  # Temporal Worker
+  worker:
+    build:
+      context: .
+      target: worker
+    environment:
+      - TEMPORAL_HOST=temporal:7233
+      - LLM_BASE_URL=http://ollama:11434
+      - LLM_MODEL=qwen2.5:32b
+      - PROMETHEUS_URL=http://prometheus:9090
+      - JAEGER_URL=http://jaeger:16686
+      - LOKI_URL=http://loki:3100
+    volumes:
+      - ./config.yaml:/app/config.yaml
+      - ./knowledge:/app/knowledge
+    depends_on:
+      - temporal
+      - ollama
+      - qdrant
+    networks:
+      - observability
+    restart: unless-stopped
+    deploy:
+      replicas: 2
+
+  # Observability stack (optional - for testing)
+  prometheus:
+    image: prom/prometheus:latest
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./deploy/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    networks:
+      - observability
+
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    ports:
+      - "16686:16686"
+      - "14268:14268"
+      - "14250:14250"
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+    networks:
+      - observability
+
+  loki:
+    image: grafana/loki:latest
+    ports:
+      - "3100:3100"
+    volumes:
+      - loki_data:/loki
+    networks:
+      - observability
+
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./deploy/grafana/provisioning:/etc/grafana/provisioning
+    depends_on:
+      - prometheus
+      - loki
+      - jaeger
+    networks:
+      - observability
+
+networks:
+  observability:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  qdrant_data:
+  ollama_data:
+  prometheus_data:
+  loki_data:
+  grafana_data:
