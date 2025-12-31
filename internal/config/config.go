@@ -11,13 +11,41 @@ import (
 // Config represents the main configuration
 type Config struct {
 	Server      ServerConfig      `yaml:"server"`
+	Features    FeaturesConfig    `yaml:"features"`
 	Temporal    TemporalConfig    `yaml:"temporal"`
 	LLM         LLMConfig         `yaml:"llm"`
 	RAG         RAGConfig         `yaml:"rag"`
+	Caching     CachingConfig     `yaml:"caching"`
 	Collectors  CollectorsConfig  `yaml:"collectors"`
+	Agents      AgentsConfig      `yaml:"agents"`
 	Analysis    AnalysisConfig    `yaml:"analysis"`
 	Alerting    AlertingConfig    `yaml:"alerting"`
+	Metrics     MetricsConfig     `yaml:"metrics"`
 	Logging     LoggingConfig     `yaml:"logging"`
+}
+
+// FeaturesConfig contains feature flags to enable/disable major components
+type FeaturesConfig struct {
+	// EnableTemporal enables Temporal workflow orchestration
+	// When disabled, analysis runs synchronously without workflow durability
+	EnableTemporal bool `yaml:"enable_temporal"`
+
+	// EnableRAG enables the RAG system for knowledge-augmented analysis
+	// When disabled, LLM analysis runs without context from knowledge base
+	EnableRAG bool `yaml:"enable_rag"`
+
+	// EnableCaching enables LLM response caching
+	// Helps reduce costs and latency for repeated queries
+	EnableCaching bool `yaml:"enable_caching"`
+
+	// EnableMetrics enables Prometheus metrics for self-observability
+	EnableMetrics bool `yaml:"enable_metrics"`
+
+	// EnableAlerting enables alert notifications (Slack, PagerDuty, etc.)
+	EnableAlerting bool `yaml:"enable_alerting"`
+
+	// EnablePredictions enables predictive analysis and forecasting
+	EnablePredictions bool `yaml:"enable_predictions"`
 }
 
 // ServerConfig contains HTTP server settings
@@ -33,14 +61,49 @@ type ServerConfig struct {
 
 // TemporalConfig contains Temporal workflow settings
 type TemporalConfig struct {
-	HostPort       string `yaml:"host_port"`
-	Namespace      string `yaml:"namespace"`
-	TaskQueue      string `yaml:"task_queue"`
-	WorkerCount    int    `yaml:"worker_count"`
-	MaxConcurrent  int    `yaml:"max_concurrent"`
-	EnableTLS      bool   `yaml:"enable_tls"`
-	TLSCertFile    string `yaml:"tls_cert_file"`
-	TLSKeyFile     string `yaml:"tls_key_file"`
+	HostPort              string        `yaml:"host_port"`
+	Namespace             string        `yaml:"namespace"`
+	TaskQueue             string        `yaml:"task_queue"`
+	WorkerCount           int           `yaml:"worker_count"`
+	MaxConcurrent         int           `yaml:"max_concurrent"`
+	EnableTLS             bool          `yaml:"enable_tls"`
+	TLSCertFile           string        `yaml:"tls_cert_file"`
+	TLSKeyFile            string        `yaml:"tls_key_file"`
+	WorkflowTimeout       time.Duration `yaml:"workflow_timeout"`
+	ActivityTimeout       time.Duration `yaml:"activity_timeout"`
+	RetryMaxAttempts      int           `yaml:"retry_max_attempts"`
+	RetryInitialInterval  time.Duration `yaml:"retry_initial_interval"`
+}
+
+// CachingConfig contains LLM response caching settings
+type CachingConfig struct {
+	MaxEntries int           `yaml:"max_entries"`
+	TTL        time.Duration `yaml:"ttl"`
+	// CleanupInterval is how often to run cache cleanup
+	CleanupInterval time.Duration `yaml:"cleanup_interval"`
+}
+
+// AgentsConfig contains settings for individual analysis agents
+type AgentsConfig struct {
+	Trace  AgentConfig `yaml:"trace"`
+	Metric AgentConfig `yaml:"metric"`
+	Log    AgentConfig `yaml:"log"`
+}
+
+// AgentConfig contains settings for a single agent
+type AgentConfig struct {
+	Enabled     bool          `yaml:"enabled"`
+	Timeout     time.Duration `yaml:"timeout"`
+	MaxRetries  int           `yaml:"max_retries"`
+	Model       string        `yaml:"model"`        // Override default LLM model
+	Concurrency int           `yaml:"concurrency"`  // Max concurrent operations
+}
+
+// MetricsConfig contains self-observability metrics settings
+type MetricsConfig struct {
+	Path       string `yaml:"path"`        // Metrics endpoint path
+	Namespace  string `yaml:"namespace"`   // Prometheus namespace
+	Subsystem  string `yaml:"subsystem"`   // Prometheus subsystem
 }
 
 // LLMConfig contains LLM provider settings
@@ -71,16 +134,19 @@ type ModelConfig struct {
 
 // RAGConfig contains RAG system settings
 type RAGConfig struct {
-	VectorStore     VectorStoreConfig `yaml:"vector_store"`
-	EmbeddingModel  string            `yaml:"embedding_model"`
-	EmbeddingDim    int               `yaml:"embedding_dim"`
-	ChunkSize       int               `yaml:"chunk_size"`
-	ChunkOverlap    int               `yaml:"chunk_overlap"`
-	TopK            int               `yaml:"top_k"`
-	MinScore        float64           `yaml:"min_score"`
-	KnowledgeBase   string            `yaml:"knowledge_base_path"`
-	AutoSync        bool              `yaml:"auto_sync"`
-	SyncInterval    time.Duration     `yaml:"sync_interval"`
+	VectorStore       VectorStoreConfig `yaml:"vector_store"`
+	EmbeddingModel    string            `yaml:"embedding_model"`
+	EmbeddingProvider string            `yaml:"embedding_provider"` // ollama, openai
+	EmbeddingDim      int               `yaml:"embedding_dim"`
+	ChunkSize         int               `yaml:"chunk_size"`
+	ChunkOverlap      int               `yaml:"chunk_overlap"`
+	TopK              int               `yaml:"top_k"`
+	MinScore          float64           `yaml:"min_score"`
+	KnowledgeBase     string            `yaml:"knowledge_base_path"`
+	AutoSync          bool              `yaml:"auto_sync"`
+	SyncInterval      time.Duration     `yaml:"sync_interval"`
+	// IndexOnStartup controls whether to index the knowledge base when the application starts
+	IndexOnStartup    bool              `yaml:"index_on_startup"`
 }
 
 // VectorStoreConfig contains vector database settings
@@ -206,12 +272,24 @@ func DefaultConfig() *Config {
 			ReadTimeout:  30 * time.Second,
 			WriteTimeout: 30 * time.Second,
 		},
+		Features: FeaturesConfig{
+			EnableTemporal:    true,
+			EnableRAG:         true,
+			EnableCaching:     true,
+			EnableMetrics:     true,
+			EnableAlerting:    false,
+			EnablePredictions: true,
+		},
 		Temporal: TemporalConfig{
-			HostPort:      "localhost:7233",
-			Namespace:     "default",
-			TaskQueue:     "observability-analysis",
-			WorkerCount:   4,
-			MaxConcurrent: 10,
+			HostPort:             "localhost:7233",
+			Namespace:            "default",
+			TaskQueue:            "observability-analysis",
+			WorkerCount:          4,
+			MaxConcurrent:        10,
+			WorkflowTimeout:      10 * time.Minute,
+			ActivityTimeout:      5 * time.Minute,
+			RetryMaxAttempts:     3,
+			RetryInitialInterval: 1 * time.Second,
 		},
 		LLM: LLMConfig{
 			Provider:     "ollama",
@@ -227,17 +305,24 @@ func DefaultConfig() *Config {
 			VectorStore: VectorStoreConfig{
 				Type:       "memory",
 				Collection: "observability",
-				Dimension:  1536,
+				Dimension:  768,
 			},
-			EmbeddingModel: "nomic-embed-text",
-			EmbeddingDim:   768,
-			ChunkSize:      1000,
-			ChunkOverlap:   200,
-			TopK:           5,
-			MinScore:       0.7,
-			KnowledgeBase:  "./knowledge",
-			AutoSync:       true,
-			SyncInterval:   5 * time.Minute,
+			EmbeddingModel:    "nomic-embed-text",
+			EmbeddingProvider: "ollama",
+			EmbeddingDim:      768,
+			ChunkSize:         1000,
+			ChunkOverlap:      200,
+			TopK:              5,
+			MinScore:          0.7,
+			KnowledgeBase:     "./knowledge",
+			AutoSync:          true,
+			SyncInterval:      5 * time.Minute,
+			IndexOnStartup:    true,
+		},
+		Caching: CachingConfig{
+			MaxEntries:      1000,
+			TTL:             1 * time.Hour,
+			CleanupInterval: 5 * time.Minute,
 		},
 		Collectors: CollectorsConfig{
 			Prometheus: PrometheusConfig{
@@ -256,6 +341,26 @@ func DefaultConfig() *Config {
 				Timeout: 30 * time.Second,
 			},
 		},
+		Agents: AgentsConfig{
+			Trace: AgentConfig{
+				Enabled:     true,
+				Timeout:     2 * time.Minute,
+				MaxRetries:  3,
+				Concurrency: 5,
+			},
+			Metric: AgentConfig{
+				Enabled:     true,
+				Timeout:     2 * time.Minute,
+				MaxRetries:  3,
+				Concurrency: 5,
+			},
+			Log: AgentConfig{
+				Enabled:     true,
+				Timeout:     2 * time.Minute,
+				MaxRetries:  3,
+				Concurrency: 5,
+			},
+		},
 		Analysis: AnalysisConfig{
 			DefaultTimeRange: 1 * time.Hour,
 			MaxTraces:        1000,
@@ -271,12 +376,129 @@ func DefaultConfig() *Config {
 		Alerting: AlertingConfig{
 			Enabled: false,
 		},
+		Metrics: MetricsConfig{
+			Path:      "/metrics",
+			Namespace: "observability_analysis",
+			Subsystem: "framework",
+		},
 		Logging: LoggingConfig{
 			Level:  "info",
 			Format: "json",
 			Output: "stdout",
 		},
 	}
+}
+
+// IsFeatureEnabled checks if a feature is enabled by name
+func (c *Config) IsFeatureEnabled(feature string) bool {
+	switch feature {
+	case "temporal":
+		return c.Features.EnableTemporal
+	case "rag":
+		return c.Features.EnableRAG
+	case "caching":
+		return c.Features.EnableCaching
+	case "metrics":
+		return c.Features.EnableMetrics
+	case "alerting":
+		return c.Features.EnableAlerting
+	case "predictions":
+		return c.Features.EnablePredictions
+	default:
+		return false
+	}
+}
+
+// IsAgentEnabled checks if a specific agent is enabled
+func (c *Config) IsAgentEnabled(agent string) bool {
+	switch agent {
+	case "trace":
+		return c.Agents.Trace.Enabled
+	case "metric":
+		return c.Agents.Metric.Enabled
+	case "log":
+		return c.Agents.Log.Enabled
+	default:
+		return false
+	}
+}
+
+// IsCollectorEnabled checks if a specific collector is enabled
+func (c *Config) IsCollectorEnabled(collector string) bool {
+	switch collector {
+	case "prometheus":
+		return c.Collectors.Prometheus.Enabled
+	case "jaeger":
+		return c.Collectors.Jaeger.Enabled
+	case "loki":
+		return c.Collectors.Loki.Enabled
+	case "tempo":
+		return c.Collectors.Tempo.Enabled
+	case "otel":
+		return c.Collectors.OTEL.Enabled
+	default:
+		return false
+	}
+}
+
+// GetEnabledFeatures returns a list of enabled features
+func (c *Config) GetEnabledFeatures() []string {
+	var features []string
+	if c.Features.EnableTemporal {
+		features = append(features, "temporal")
+	}
+	if c.Features.EnableRAG {
+		features = append(features, "rag")
+	}
+	if c.Features.EnableCaching {
+		features = append(features, "caching")
+	}
+	if c.Features.EnableMetrics {
+		features = append(features, "metrics")
+	}
+	if c.Features.EnableAlerting {
+		features = append(features, "alerting")
+	}
+	if c.Features.EnablePredictions {
+		features = append(features, "predictions")
+	}
+	return features
+}
+
+// GetEnabledAgents returns a list of enabled agents
+func (c *Config) GetEnabledAgents() []string {
+	var agents []string
+	if c.Agents.Trace.Enabled {
+		agents = append(agents, "trace")
+	}
+	if c.Agents.Metric.Enabled {
+		agents = append(agents, "metric")
+	}
+	if c.Agents.Log.Enabled {
+		agents = append(agents, "log")
+	}
+	return agents
+}
+
+// GetEnabledCollectors returns a list of enabled collectors
+func (c *Config) GetEnabledCollectors() []string {
+	var collectors []string
+	if c.Collectors.Prometheus.Enabled {
+		collectors = append(collectors, "prometheus")
+	}
+	if c.Collectors.Jaeger.Enabled {
+		collectors = append(collectors, "jaeger")
+	}
+	if c.Collectors.Loki.Enabled {
+		collectors = append(collectors, "loki")
+	}
+	if c.Collectors.Tempo.Enabled {
+		collectors = append(collectors, "tempo")
+	}
+	if c.Collectors.OTEL.Enabled {
+		collectors = append(collectors, "otel")
+	}
+	return collectors
 }
 
 // Load loads configuration from a YAML file

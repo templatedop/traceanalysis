@@ -15,10 +15,8 @@ import (
 
 	"github.com/traceanalysis/rag-temporal/internal/config"
 	"github.com/traceanalysis/rag-temporal/internal/types"
-	"github.com/traceanalysis/rag-temporal/pkg/agents"
-	"github.com/traceanalysis/rag-temporal/pkg/collectors"
-	"github.com/traceanalysis/rag-temporal/pkg/llm"
-	"github.com/traceanalysis/rag-temporal/pkg/rag"
+	"github.com/traceanalysis/rag-temporal/pkg/framework"
+	"github.com/traceanalysis/rag-temporal/pkg/metrics"
 	"github.com/traceanalysis/rag-temporal/pkg/workflow"
 )
 
@@ -44,11 +42,16 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Initialize components
-	server, err := NewServer(ctx, cfg)
-	if err != nil {
-		log.Fatalf("Failed to create server: %v", err)
+	// Create framework manager
+	manager := framework.NewManager(cfg)
+
+	// Initialize framework
+	if err := manager.Initialize(ctx); err != nil {
+		log.Fatalf("Failed to initialize framework: %v", err)
 	}
+
+	// Create server
+	server := NewServer(cfg, manager)
 
 	// Handle shutdown gracefully
 	sigChan := make(chan os.Signal, 1)
@@ -58,12 +61,17 @@ func main() {
 		<-sigChan
 		log.Println("Shutting down...")
 		cancel()
+		manager.Shutdown(context.Background())
 		server.Shutdown(context.Background())
 	}()
 
 	// Start server
 	addr := fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port)
 	log.Printf("Starting server on %s", addr)
+	log.Printf("Enabled features: %v", cfg.GetEnabledFeatures())
+	log.Printf("Enabled agents: %v", cfg.GetEnabledAgents())
+	log.Printf("Enabled collectors: %v", cfg.GetEnabledCollectors())
+
 	if err := server.Start(addr); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("Server error: %v", err)
 	}
@@ -71,61 +79,16 @@ func main() {
 
 // Server represents the API server
 type Server struct {
-	config         *config.Config
-	httpServer     *http.Server
-	workflowClient *workflow.WorkflowClient
-	registry       *agents.AgentRegistry
-	ragStore       rag.Store
-	llmClient      llm.Client
+	config     *config.Config
+	httpServer *http.Server
+	manager    *framework.Manager
 }
 
 // NewServer creates a new API server
-func NewServer(ctx context.Context, cfg *config.Config) (*Server, error) {
-	// Initialize embedder
-	var embedder rag.EmbeddingProvider
-	if cfg.LLM.Provider == "ollama" {
-		embedder = rag.NewOllamaEmbedder(cfg.LLM.BaseURL, cfg.RAG.EmbeddingModel, cfg.RAG.EmbeddingDim)
-	} else {
-		embedder = rag.NewNoOpEmbedder(cfg.RAG.EmbeddingDim)
-	}
-
-	// Initialize RAG store
-	ragStore := rag.NewMemoryStore(embedder)
-
-	// Load knowledge base if configured
-	if cfg.RAG.KnowledgeBase != "" {
-		kb := rag.NewKnowledgeBase(ragStore, embedder, cfg.RAG.KnowledgeBase)
-		if err := kb.LoadFromDirectory(ctx, cfg.RAG.KnowledgeBase); err != nil {
-			log.Printf("Warning: failed to load knowledge base: %v", err)
-		}
-	}
-
-	// Initialize LLM client
-	llmClient, err := llm.NewClient(
-		cfg.LLM.Provider,
-		cfg.LLM.BaseURL,
-		cfg.LLM.APIKey,
-		cfg.LLM.DefaultModel,
-		cfg.LLM.Timeout,
-		cfg.LLM.Temperature,
-		cfg.LLM.MaxTokens,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create LLM client: %w", err)
-	}
-
-	// Initialize workflow client
-	workflowClient, err := workflow.NewWorkflowClient(&cfg.Temporal)
-	if err != nil {
-		log.Printf("Warning: failed to create workflow client: %v", err)
-	}
-
+func NewServer(cfg *config.Config, manager *framework.Manager) *Server {
 	server := &Server{
-		config:         cfg,
-		workflowClient: workflowClient,
-		registry:       agents.NewAgentRegistry(),
-		ragStore:       ragStore,
-		llmClient:      llmClient,
+		config:  cfg,
+		manager: manager,
 	}
 
 	// Register routes
@@ -138,7 +101,7 @@ func NewServer(ctx context.Context, cfg *config.Config) (*Server, error) {
 		WriteTimeout: cfg.Server.WriteTimeout,
 	}
 
-	return server, nil
+	return server
 }
 
 // Start starts the HTTP server
@@ -149,59 +112,101 @@ func (s *Server) Start(addr string) error {
 
 // Shutdown shuts down the server
 func (s *Server) Shutdown(ctx context.Context) error {
-	if s.workflowClient != nil {
-		s.workflowClient.Close()
-	}
 	return s.httpServer.Shutdown(ctx)
 }
 
 func (s *Server) registerRoutes(mux *http.ServeMux) {
-	// Health check
+	// Health check endpoints
 	mux.HandleFunc("/health", s.handleHealth)
 	mux.HandleFunc("/ready", s.handleReady)
+
+	// Metrics endpoint (if enabled)
+	if s.config.Features.EnableMetrics {
+		mux.Handle(s.config.Metrics.Path, metrics.Handler())
+	}
+
+	// Feature info endpoint
+	mux.HandleFunc("/api/v1/features", s.handleFeatures)
 
 	// Analysis endpoints
 	mux.HandleFunc("/api/v1/analyze", s.handleAnalyze)
 	mux.HandleFunc("/api/v1/analyze/incident", s.handleIncidentAnalysis)
-	mux.HandleFunc("/api/v1/analyze/status", s.handleAnalysisStatus)
-	mux.HandleFunc("/api/v1/analyze/result", s.handleAnalysisResult)
 
-	// Monitoring endpoints
-	mux.HandleFunc("/api/v1/monitor/start", s.handleStartMonitoring)
-	mux.HandleFunc("/api/v1/monitor/stop", s.handleStopMonitoring)
+	// Temporal workflow endpoints (only if Temporal is enabled)
+	if s.config.Features.EnableTemporal {
+		mux.HandleFunc("/api/v1/analyze/status", s.handleAnalysisStatus)
+		mux.HandleFunc("/api/v1/analyze/result", s.handleAnalysisResult)
+		mux.HandleFunc("/api/v1/monitor/start", s.handleStartMonitoring)
+		mux.HandleFunc("/api/v1/monitor/stop", s.handleStopMonitoring)
+	}
 
-	// RAG endpoints
-	mux.HandleFunc("/api/v1/knowledge/query", s.handleRAGQuery)
-	mux.HandleFunc("/api/v1/knowledge/add", s.handleRAGAdd)
+	// RAG endpoints (only if RAG is enabled)
+	if s.config.Features.EnableRAG {
+		mux.HandleFunc("/api/v1/knowledge/query", s.handleRAGQuery)
+		mux.HandleFunc("/api/v1/knowledge/add", s.handleRAGAdd)
+		mux.HandleFunc("/api/v1/knowledge/stats", s.handleRAGStats)
+	}
 
 	// Query endpoint (natural language)
 	mux.HandleFunc("/api/v1/query", s.handleNaturalLanguageQuery)
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	health := s.manager.Health(r.Context())
+	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(map[string]string{"status": "healthy"})
+	json.NewEncoder(w).Encode(health)
 }
 
 func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
-	// Check LLM health
-	if err := s.llmClient.Health(r.Context()); err != nil {
-		http.Error(w, fmt.Sprintf("LLM not ready: %v", err), http.StatusServiceUnavailable)
+	health := s.manager.Health(r.Context())
+	if !health["initialized"].(bool) {
+		http.Error(w, "Not ready", http.StatusServiceUnavailable)
 		return
 	}
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(map[string]string{"status": "ready"})
 }
 
+func (s *Server) handleFeatures(w http.ResponseWriter, r *http.Request) {
+	features := map[string]interface{}{
+		"enabled_features":   s.config.GetEnabledFeatures(),
+		"enabled_agents":     s.config.GetEnabledAgents(),
+		"enabled_collectors": s.config.GetEnabledCollectors(),
+		"feature_flags": map[string]bool{
+			"temporal":    s.config.Features.EnableTemporal,
+			"rag":         s.config.Features.EnableRAG,
+			"caching":     s.config.Features.EnableCaching,
+			"metrics":     s.config.Features.EnableMetrics,
+			"alerting":    s.config.Features.EnableAlerting,
+			"predictions": s.config.Features.EnablePredictions,
+		},
+		"agents": map[string]bool{
+			"trace":  s.config.Agents.Trace.Enabled,
+			"metric": s.config.Agents.Metric.Enabled,
+			"log":    s.config.Agents.Log.Enabled,
+		},
+		"collectors": map[string]bool{
+			"prometheus": s.config.Collectors.Prometheus.Enabled,
+			"jaeger":     s.config.Collectors.Jaeger.Enabled,
+			"loki":       s.config.Collectors.Loki.Enabled,
+			"tempo":      s.config.Collectors.Tempo.Enabled,
+			"otel":       s.config.Collectors.OTEL.Enabled,
+		},
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(features)
+}
+
 // AnalyzeRequest is the request body for analysis
 type AnalyzeRequest struct {
-	Query       string   `json:"query"`
-	Services    []string `json:"services,omitempty"`
-	TimeRangeMinutes int `json:"time_range_minutes,omitempty"`
-	AnalysisType string  `json:"analysis_type,omitempty"` // trace, metric, log, all
-	IncludeRAG  bool     `json:"include_rag"`
-	Notify      bool     `json:"notify"`
-	Async       bool     `json:"async"`
+	Query            string   `json:"query"`
+	Services         []string `json:"services,omitempty"`
+	TimeRangeMinutes int      `json:"time_range_minutes,omitempty"`
+	AnalysisType     string   `json:"analysis_type,omitempty"` // trace, metric, log, all
+	IncludeRAG       bool     `json:"include_rag"`
+	Notify           bool     `json:"notify"`
+	Async            bool     `json:"async"`
 }
 
 func (s *Server) handleAnalyze(w http.ResponseWriter, r *http.Request) {
@@ -225,45 +230,34 @@ func (s *Server) handleAnalyze(w http.ResponseWriter, r *http.Request) {
 	}
 
 	now := time.Now()
-	timeRange := types.TimeRange{
-		Start: now.Add(-time.Duration(req.TimeRangeMinutes) * time.Minute),
-		End:   now,
+	analysisReq := &types.AnalysisRequest{
+		ID:       fmt.Sprintf("req-%d", now.UnixNano()),
+		Query:    req.Query,
+		Services: req.Services,
+		TimeRange: types.TimeRange{
+			Start: now.Add(-time.Duration(req.TimeRangeMinutes) * time.Minute),
+			End:   now,
+		},
+		IncludeRAG: req.IncludeRAG,
 	}
 
-	input := workflow.ObservabilityAnalysisInput{
-		Query:        req.Query,
-		Services:     req.Services,
-		TimeRange:    timeRange,
-		AnalysisType: req.AnalysisType,
-		IncludeRAG:   req.IncludeRAG,
-		Notify:       req.Notify,
-	}
-
-	if s.workflowClient == nil {
-		http.Error(w, "Workflow client not available", http.StatusServiceUnavailable)
-		return
-	}
-
-	workflowID, err := s.workflowClient.StartAnalysis(r.Context(), input)
+	// Use framework manager to run analysis
+	result, err := s.manager.Analyze(r.Context(), analysisReq)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("Failed to start analysis: %v", err), http.StatusInternalServerError)
+		http.Error(w, fmt.Sprintf("Analysis failed: %v", err), http.StatusInternalServerError)
 		return
 	}
 
-	if req.Async {
-		w.WriteHeader(http.StatusAccepted)
-		json.NewEncoder(w).Encode(map[string]string{
-			"workflow_id": workflowID,
-			"status":      "started",
-		})
-		return
-	}
-
-	// Wait for result
-	result, err := s.workflowClient.GetResult(r.Context(), workflowID)
-	if err != nil {
-		http.Error(w, fmt.Sprintf("Failed to get result: %v", err), http.StatusInternalServerError)
-		return
+	// Send alerts if enabled and requested
+	if req.Notify && s.config.Features.EnableAlerting {
+		for i := range result.Findings {
+			finding := &result.Findings[i]
+			if finding.Severity == types.SeverityHigh || finding.Severity == types.SeverityCritical {
+				if err := s.manager.SendAlert(r.Context(), finding); err != nil {
+					log.Printf("Failed to send alert: %v", err)
+				}
+			}
+		}
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -282,6 +276,17 @@ type IncidentRequest struct {
 func (s *Server) handleIncidentAnalysis(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if !s.config.Features.EnableTemporal {
+		http.Error(w, "Incident analysis requires Temporal to be enabled", http.StatusBadRequest)
+		return
+	}
+
+	workflowClient := s.manager.GetWorkflowClient()
+	if workflowClient == nil {
+		http.Error(w, "Workflow client not available", http.StatusServiceUnavailable)
 		return
 	}
 
@@ -309,18 +314,13 @@ func (s *Server) handleIncidentAnalysis(w http.ResponseWriter, r *http.Request) 
 		Symptoms:    req.Symptoms,
 	}
 
-	if s.workflowClient == nil {
-		http.Error(w, "Workflow client not available", http.StatusServiceUnavailable)
-		return
-	}
-
-	workflowID, err := s.workflowClient.StartIncidentAnalysis(r.Context(), input)
+	workflowID, err := workflowClient.StartIncidentAnalysis(r.Context(), input)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to start analysis: %v", err), http.StatusInternalServerError)
 		return
 	}
 
-	result, err := s.workflowClient.GetResult(r.Context(), workflowID)
+	result, err := workflowClient.GetResult(r.Context(), workflowID)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to get result: %v", err), http.StatusInternalServerError)
 		return
@@ -337,12 +337,13 @@ func (s *Server) handleAnalysisStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if s.workflowClient == nil {
+	workflowClient := s.manager.GetWorkflowClient()
+	if workflowClient == nil {
 		http.Error(w, "Workflow client not available", http.StatusServiceUnavailable)
 		return
 	}
 
-	status, err := s.workflowClient.GetStatus(r.Context(), workflowID)
+	status, err := workflowClient.GetStatus(r.Context(), workflowID)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to get status: %v", err), http.StatusInternalServerError)
 		return
@@ -361,12 +362,13 @@ func (s *Server) handleAnalysisResult(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if s.workflowClient == nil {
+	workflowClient := s.manager.GetWorkflowClient()
+	if workflowClient == nil {
 		http.Error(w, "Workflow client not available", http.StatusServiceUnavailable)
 		return
 	}
 
-	result, err := s.workflowClient.GetResult(r.Context(), workflowID)
+	result, err := workflowClient.GetResult(r.Context(), workflowID)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to get result: %v", err), http.StatusInternalServerError)
 		return
@@ -378,14 +380,20 @@ func (s *Server) handleAnalysisResult(w http.ResponseWriter, r *http.Request) {
 
 // MonitorRequest is the request for continuous monitoring
 type MonitorRequest struct {
-	Services       []string `json:"services,omitempty"`
-	IntervalMinutes int     `json:"interval_minutes,omitempty"`
-	LookbackMinutes int     `json:"lookback_minutes,omitempty"`
+	Services        []string `json:"services,omitempty"`
+	IntervalMinutes int      `json:"interval_minutes,omitempty"`
+	LookbackMinutes int      `json:"lookback_minutes,omitempty"`
 }
 
 func (s *Server) handleStartMonitoring(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	workflowClient := s.manager.GetWorkflowClient()
+	if workflowClient == nil {
+		http.Error(w, "Workflow client not available", http.StatusServiceUnavailable)
 		return
 	}
 
@@ -409,12 +417,7 @@ func (s *Server) handleStartMonitoring(w http.ResponseWriter, r *http.Request) {
 		AlertThreshold: types.SeverityMedium,
 	}
 
-	if s.workflowClient == nil {
-		http.Error(w, "Workflow client not available", http.StatusServiceUnavailable)
-		return
-	}
-
-	workflowID, err := s.workflowClient.StartContinuousMonitoring(r.Context(), input)
+	workflowID, err := workflowClient.StartContinuousMonitoring(r.Context(), input)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to start monitoring: %v", err), http.StatusInternalServerError)
 		return
@@ -433,18 +436,19 @@ func (s *Server) handleStopMonitoring(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	workflowClient := s.manager.GetWorkflowClient()
+	if workflowClient == nil {
+		http.Error(w, "Workflow client not available", http.StatusServiceUnavailable)
+		return
+	}
+
 	workflowID := r.URL.Query().Get("workflow_id")
 	if workflowID == "" {
 		http.Error(w, "workflow_id required", http.StatusBadRequest)
 		return
 	}
 
-	if s.workflowClient == nil {
-		http.Error(w, "Workflow client not available", http.StatusServiceUnavailable)
-		return
-	}
-
-	if err := s.workflowClient.CancelWorkflow(r.Context(), workflowID); err != nil {
+	if err := workflowClient.CancelWorkflow(r.Context(), workflowID); err != nil {
 		http.Error(w, fmt.Sprintf("Failed to stop monitoring: %v", err), http.StatusInternalServerError)
 		return
 	}
@@ -457,9 +461,8 @@ func (s *Server) handleStopMonitoring(w http.ResponseWriter, r *http.Request) {
 
 // RAGQueryRequest is the request for RAG queries
 type RAGQueryRequest struct {
-	Query string   `json:"query"`
-	TopK  int      `json:"top_k,omitempty"`
-	Types []string `json:"types,omitempty"`
+	Query string `json:"query"`
+	TopK  int    `json:"top_k,omitempty"`
 }
 
 func (s *Server) handleRAGQuery(w http.ResponseWriter, r *http.Request) {
@@ -475,13 +478,19 @@ func (s *Server) handleRAGQuery(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if req.TopK == 0 {
-		req.TopK = 5
+		req.TopK = s.config.RAG.TopK
 	}
 
-	result, err := s.ragStore.Query(r.Context(), &types.RAGQuery{
-		Query: req.Query,
-		TopK:  req.TopK,
-		Types: req.Types,
+	vectorStore := s.manager.GetVectorStore()
+	if vectorStore == nil {
+		http.Error(w, "RAG not available", http.StatusServiceUnavailable)
+		return
+	}
+
+	ragResult, err := vectorStore.Query(r.Context(), &types.RAGQuery{
+		Query:    req.Query,
+		TopK:     req.TopK,
+		MinScore: s.config.RAG.MinScore,
 	})
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Query failed: %v", err), http.StatusInternalServerError)
@@ -489,13 +498,18 @@ func (s *Server) handleRAGQuery(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(result)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"query":     req.Query,
+		"documents": ragResult.Documents,
+		"count":     ragResult.TotalFound,
+	})
 }
 
 // RAGAddRequest is the request for adding documents
 type RAGAddRequest struct {
-	Type     string            `json:"type"`
-	Title    string            `json:"title"`
+	ID       string            `json:"id,omitempty"`
+	Type     string            `json:"type,omitempty"`
+	Title    string            `json:"title,omitempty"`
 	Content  string            `json:"content"`
 	Tags     []string          `json:"tags,omitempty"`
 	Metadata map[string]string `json:"metadata,omitempty"`
@@ -513,7 +527,19 @@ func (s *Server) handleRAGAdd(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	vectorStore := s.manager.GetVectorStore()
+	if vectorStore == nil {
+		http.Error(w, "RAG not available", http.StatusServiceUnavailable)
+		return
+	}
+
+	docID := req.ID
+	if docID == "" {
+		docID = fmt.Sprintf("doc-%d", time.Now().UnixNano())
+	}
+
 	doc := &types.RAGDocument{
+		ID:       docID,
 		Type:     req.Type,
 		Title:    req.Title,
 		Content:  req.Content,
@@ -521,15 +547,37 @@ func (s *Server) handleRAGAdd(w http.ResponseWriter, r *http.Request) {
 		Metadata: req.Metadata,
 	}
 
-	if err := s.ragStore.Add(r.Context(), doc); err != nil {
+	if err := vectorStore.Add(r.Context(), doc); err != nil {
 		http.Error(w, fmt.Sprintf("Failed to add document: %v", err), http.StatusInternalServerError)
 		return
 	}
 
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(map[string]string{
-		"id":     doc.ID,
+		"id":     docID,
 		"status": "created",
+	})
+}
+
+func (s *Server) handleRAGStats(w http.ResponseWriter, r *http.Request) {
+	vectorStore := s.manager.GetVectorStore()
+	if vectorStore == nil {
+		http.Error(w, "RAG not available", http.StatusServiceUnavailable)
+		return
+	}
+
+	count, err := vectorStore.Count(r.Context())
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to get stats: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"document_count":  count,
+		"vector_store":    s.config.RAG.VectorStore.Type,
+		"embedding_model": s.config.RAG.EmbeddingModel,
+		"dimension":       s.config.RAG.EmbeddingDim,
 	})
 }
 
@@ -552,28 +600,8 @@ func (s *Server) handleNaturalLanguageQuery(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	// Get RAG context
-	ragResult, _ := s.ragStore.Query(r.Context(), &types.RAGQuery{
-		Query: req.Query,
-		TopK:  5,
-	})
-
-	var ragContext string
-	if ragResult != nil {
-		for _, doc := range ragResult.Documents {
-			ragContext += fmt.Sprintf("--- %s ---\n%s\n\n", doc.Title, doc.Content)
-		}
-	}
-
-	// Query LLM
-	systemPrompt := llm.NaturalLanguageQueryPrompt
-	userPrompt := fmt.Sprintf("Query: %s\n\nKnowledge Base Context:\n%s", req.Query, ragContext)
-
-	resp, err := s.llmClient.Complete(r.Context(), &types.LLMRequest{
-		SystemPrompt: systemPrompt,
-		UserPrompt:   userPrompt,
-		Temperature:  0.3,
-	})
+	// Use the framework manager's Query method which handles RAG and caching
+	response, err := s.manager.Query(r.Context(), req.Query)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Query failed: %v", err), http.StatusInternalServerError)
 		return
@@ -581,13 +609,9 @@ func (s *Server) handleNaturalLanguageQuery(w http.ResponseWriter, r *http.Reque
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"query":    req.Query,
-		"response": resp.Content,
-		"sources":  ragResult.TotalFound,
+		"query":           req.Query,
+		"response":        response,
+		"rag_enabled":     s.config.Features.EnableRAG,
+		"caching_enabled": s.config.Features.EnableCaching,
 	})
 }
-
-// Ensure collectors are not unused
-var _ = collectors.NewPrometheusCollector
-var _ = collectors.NewJaegerCollector
-var _ = collectors.NewLokiCollector
