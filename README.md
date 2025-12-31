@@ -12,6 +12,23 @@ A comprehensive RAG (Retrieval-Augmented Generation) framework in Golang using T
 - **Natural Language Queries**: Ask questions in plain English
 - **Predictive Analysis**: Capacity forecasting and anomaly detection
 - **Continuous Monitoring**: Automated analysis at configurable intervals
+- **Configurable Features**: Enable/disable Temporal, RAG, caching, metrics, alerting
+- **Graceful Shutdown**: Clean shutdown with connection draining
+
+## Table of Contents
+
+- [Quick Start](#quick-start)
+- [Deployment](#deployment)
+  - [Docker Compose](#docker-compose-deployment)
+  - [Kubernetes with Helm](#kubernetes-deployment-helm)
+  - [Kubernetes (Raw Manifests)](#kubernetes-deployment-raw-manifests)
+- [Configuration](#configuration)
+  - [Feature Flags](#feature-flags)
+  - [Graceful Shutdown](#graceful-shutdown)
+- [API Reference](#api-reference)
+- [Knowledge Base](#knowledge-base)
+- [Agent Capabilities](#agent-capabilities)
+- [Development](#development)
 
 ## Quick Start
 
@@ -33,6 +50,9 @@ cd rag-temporal
 go mod tidy
 
 # Build binaries
+make build
+
+# Or build manually
 go build -o bin/server ./cmd/server
 go build -o bin/worker ./cmd/worker
 go build -o bin/rag-cli ./cmd/cli
@@ -42,34 +62,11 @@ go build -o bin/rag-cli ./cmd/cli
 
 ```bash
 # Create configuration from example
-cp config.example.yaml config.yaml
+make init-config
+# Or: cp config.example.yaml config.yaml
 
 # Edit configuration
 vim config.yaml
-```
-
-Key configuration options:
-
-```yaml
-llm:
-  provider: "ollama"
-  default_model: "qwen2.5:32b"
-  base_url: "http://localhost:11434"
-
-temporal:
-  host_port: "localhost:7233"
-  task_queue: "observability-analysis"
-
-collectors:
-  prometheus:
-    enabled: true
-    url: "http://localhost:9090"
-  jaeger:
-    enabled: true
-    query_url: "http://localhost:16686"
-  loki:
-    enabled: true
-    url: "http://localhost:3100"
 ```
 
 ### Starting Services
@@ -85,7 +82,378 @@ temporal server start-dev
 ./bin/server --config config.yaml
 ```
 
-### Using the CLI
+## Deployment
+
+### Docker Compose Deployment
+
+The fastest way to get started with all dependencies:
+
+```bash
+# Start all services (Temporal, Qdrant, Ollama, Prometheus, Jaeger, Loki, Grafana)
+make compose-up
+
+# Or build from source and start
+make compose-up-build
+
+# Pull required LLM models
+make compose-pull-models
+
+# View logs
+make compose-logs
+
+# Check status
+make compose-ps
+
+# Stop all services
+make compose-down
+
+# Stop and remove volumes
+make compose-down-volumes
+```
+
+**Services and Ports:**
+
+| Service | Port | Description |
+|---------|------|-------------|
+| API Server | 8080 | Main API endpoint |
+| Temporal UI | 8088 | Workflow management |
+| Temporal | 7233 | Temporal gRPC |
+| Grafana | 3000 | Dashboards (admin/admin) |
+| Prometheus | 9090 | Metrics |
+| Jaeger | 16686 | Trace UI |
+| Loki | 3100 | Log aggregation |
+| Qdrant | 6333 | Vector database |
+| Ollama | 11434 | LLM API |
+
+**Environment Variables:**
+
+```bash
+# Set version for builds
+export VERSION=1.0.0
+export COMMIT=$(git rev-parse --short HEAD)
+export BUILD_TIME=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+# Start with version info
+docker-compose up -d --build
+```
+
+### Kubernetes Deployment (Helm)
+
+The recommended way to deploy to Kubernetes:
+
+```bash
+# Lint the chart
+make helm-lint
+
+# Preview rendered templates
+make helm-template
+
+# Install with defaults (Ollama)
+make helm-install
+
+# Or with custom values
+helm install observability-analysis ./helm/observability-analysis \
+  --namespace observability-analysis \
+  --create-namespace \
+  --set secrets.llmApiKey=sk-xxx \
+  --set config.llm.provider=openai \
+  --set config.llm.defaultModel=gpt-4
+
+# Upgrade existing release
+make helm-upgrade
+
+# Check status
+make helm-status
+
+# Get current values
+make helm-values
+
+# Uninstall
+make helm-uninstall
+```
+
+**Common Helm Values:**
+
+```yaml
+# values-production.yaml
+server:
+  replicaCount: 3
+  autoscaling:
+    enabled: true
+    minReplicas: 3
+    maxReplicas: 10
+
+worker:
+  replicaCount: 5
+  autoscaling:
+    enabled: true
+    minReplicas: 5
+    maxReplicas: 20
+
+config:
+  features:
+    enableTemporal: true
+    enableRAG: true
+    enableCaching: true
+    enableMetrics: true
+    enableAlerting: true
+
+  llm:
+    provider: openai
+    defaultModel: gpt-4
+
+  server:
+    shutdownTimeout: 30s
+    drainTimeout: 10s
+
+secrets:
+  llmApiKey: "sk-xxx"
+
+server:
+  ingress:
+    enabled: true
+    className: nginx
+    hosts:
+      - host: observability.example.com
+        paths:
+          - path: /
+            pathType: Prefix
+    tls:
+      - secretName: observability-tls
+        hosts:
+          - observability.example.com
+```
+
+```bash
+# Install with custom values file
+helm install observability-analysis ./helm/observability-analysis \
+  -f values-production.yaml \
+  --namespace production
+```
+
+### Kubernetes Deployment (Raw Manifests)
+
+For simple deployments without Helm:
+
+```bash
+# Deploy
+make deploy
+# Or: kubectl apply -f deploy/kubernetes/deployment.yaml
+
+# Undeploy
+make undeploy
+
+# Port forward for testing
+make k8s-port-forward
+
+# View logs
+make k8s-logs-server
+make k8s-logs-worker
+```
+
+### Docker Build
+
+Build individual images:
+
+```bash
+# Build all images
+make docker-build
+
+# Build with custom registry
+DOCKER_REGISTRY=myregistry.io make docker-build
+
+# Push images
+make docker-push
+
+# Tag as latest
+make docker-tag-latest
+```
+
+**Multi-stage build targets:**
+
+```bash
+# Build specific targets
+docker build -t myapp-server --target server .
+docker build -t myapp-worker --target worker .
+docker build -t myapp-cli --target cli .
+```
+
+## Configuration
+
+### Feature Flags
+
+The framework supports configurable feature flags to enable/disable components:
+
+```yaml
+# config.yaml
+features:
+  # Enable Temporal workflow orchestration
+  # When disabled, analysis runs synchronously
+  enable_temporal: true
+
+  # Enable RAG (Retrieval-Augmented Generation)
+  # When disabled, LLM analysis runs without knowledge base
+  enable_rag: true
+
+  # Enable LLM response caching
+  # Reduces costs and latency for repeated queries
+  enable_caching: true
+
+  # Enable Prometheus metrics for self-observability
+  enable_metrics: true
+
+  # Enable alert notifications (Slack, PagerDuty)
+  enable_alerting: false
+
+  # Enable predictive analysis and forecasting
+  enable_predictions: true
+```
+
+**Agent Configuration:**
+
+```yaml
+agents:
+  trace:
+    enabled: true
+    timeout: 2m
+    max_retries: 3
+    concurrency: 5
+  metric:
+    enabled: true
+    timeout: 2m
+  log:
+    enabled: false  # Disable log agent
+```
+
+**Collector Configuration:**
+
+```yaml
+collectors:
+  prometheus:
+    enabled: true
+    url: "http://prometheus:9090"
+  jaeger:
+    enabled: true
+    query_url: "http://jaeger:16686"
+  loki:
+    enabled: false  # Disable Loki
+```
+
+### Graceful Shutdown
+
+The framework handles graceful shutdown with configurable timeouts:
+
+```yaml
+server:
+  host: "0.0.0.0"
+  port: 8080
+  read_timeout: 30s
+  write_timeout: 30s
+  idle_timeout: 120s
+  # Graceful shutdown settings
+  shutdown_timeout: 30s  # Max time for entire shutdown
+  drain_timeout: 10s     # Time to wait for in-flight requests
+```
+
+**Shutdown Behavior:**
+
+1. Receives SIGTERM/SIGINT signal
+2. Stops accepting new requests (returns 503)
+3. Health/Ready endpoints return "shutting_down" status
+4. Waits for drain_timeout to complete in-flight requests
+5. Closes HTTP server
+6. Closes framework components (Temporal, RAG, cache, etc.)
+7. Exits cleanly
+
+**Kubernetes Integration:**
+
+```yaml
+# Deployment should match shutdown timeout
+spec:
+  terminationGracePeriodSeconds: 45  # > shutdown_timeout + drain_timeout
+```
+
+## API Reference
+
+### Health Endpoints
+
+```bash
+# Health check (shows component status)
+curl http://localhost:8080/health
+
+# Readiness check (for load balancers)
+curl http://localhost:8080/ready
+
+# List enabled features
+curl http://localhost:8080/api/v1/features
+```
+
+### Analysis Endpoints
+
+```bash
+# Run analysis
+curl -X POST http://localhost:8080/api/v1/analyze \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": "Why is checkout slow?",
+    "services": ["api", "payment"],
+    "time_range_minutes": 60,
+    "include_rag": true
+  }'
+
+# Natural language query
+curl -X POST http://localhost:8080/api/v1/query \
+  -H "Content-Type: application/json" \
+  -d '{"query": "What could cause memory leaks?"}'
+
+# Incident analysis (requires Temporal)
+curl -X POST http://localhost:8080/api/v1/analyze/incident \
+  -H "Content-Type: application/json" \
+  -d '{
+    "title": "Payment Service Down",
+    "description": "Users unable to complete checkout",
+    "services": ["payment", "db"],
+    "symptoms": ["500 errors", "timeout"]
+  }'
+```
+
+### RAG Endpoints (when enabled)
+
+```bash
+# Query knowledge base
+curl -X POST http://localhost:8080/api/v1/knowledge/query \
+  -H "Content-Type: application/json" \
+  -d '{"query": "database connection issues", "top_k": 5}'
+
+# Add document
+curl -X POST http://localhost:8080/api/v1/knowledge/add \
+  -H "Content-Type: application/json" \
+  -d '{
+    "type": "runbook",
+    "title": "High CPU Runbook",
+    "content": "Steps to diagnose high CPU..."
+  }'
+
+# Get stats
+curl http://localhost:8080/api/v1/knowledge/stats
+```
+
+### Monitoring Endpoints (requires Temporal)
+
+```bash
+# Start continuous monitoring
+curl -X POST http://localhost:8080/api/v1/monitor/start \
+  -H "Content-Type: application/json" \
+  -d '{"services": ["api"], "interval_minutes": 5}'
+
+# Stop monitoring
+curl -X POST "http://localhost:8080/api/v1/monitor/stop?workflow_id=xxx"
+
+# Check workflow status
+curl "http://localhost:8080/api/v1/analyze/status?workflow_id=xxx"
+```
+
+## CLI Usage
 
 ```bash
 # Run analysis
@@ -110,68 +478,14 @@ temporal server start-dev
 ./bin/rag-cli health
 ```
 
-### Using the API
-
-```bash
-# Run analysis
-curl -X POST http://localhost:8080/api/v1/analyze \
-  -H "Content-Type: application/json" \
-  -d '{
-    "query": "Why is checkout slow?",
-    "services": ["api", "payment"],
-    "time_range_minutes": 60,
-    "include_rag": true
-  }'
-
-# Natural language query
-curl -X POST http://localhost:8080/api/v1/query \
-  -H "Content-Type: application/json" \
-  -d '{"query": "What could cause memory leaks?"}'
-
-# Incident analysis
-curl -X POST http://localhost:8080/api/v1/analyze/incident \
-  -H "Content-Type: application/json" \
-  -d '{
-    "title": "Payment Service Down",
-    "description": "Users unable to complete checkout",
-    "services": ["payment", "db"],
-    "symptoms": ["500 errors", "timeout"]
-  }'
-```
-
-## Project Structure
-
-```
-.
-├── cmd/
-│   ├── server/          # API server
-│   ├── worker/          # Temporal worker
-│   └── cli/             # Command-line interface
-├── pkg/
-│   ├── agents/          # Analysis agents (trace, metric, log)
-│   ├── collectors/      # Data source collectors
-│   ├── llm/             # LLM client and prompts
-│   ├── rag/             # RAG system (store, embedding)
-│   └── workflow/        # Temporal workflows
-├── internal/
-│   ├── config/          # Configuration
-│   └── types/           # Core types
-├── examples/
-│   ├── runbooks/        # Example runbooks
-│   └── incidents/       # Example incidents
-├── docs/
-│   └── ARCHITECTURE.md  # Architecture documentation
-├── config.example.yaml
-└── README.md
-```
-
 ## Knowledge Base
 
-The RAG system uses a knowledge base to provide context for analysis. Populate it with:
+The RAG system uses a knowledge base to provide context for analysis:
 
 ### Runbooks
+
 ```markdown
-# examples/runbooks/high-cpu.md
+# knowledge/runbooks/high-cpu.md
 
 ## Symptoms
 - CPU usage above 80%
@@ -184,8 +498,9 @@ The RAG system uses a knowledge base to provide context for analysis. Populate i
 ```
 
 ### Past Incidents
+
 ```markdown
-# examples/incidents/api-outage-2024-01.md
+# knowledge/incidents/api-outage-2024-01.md
 
 ## Summary
 API outage due to database connection pool exhaustion
@@ -198,12 +513,15 @@ Rollback and add index
 ```
 
 Load knowledge base:
-```bash
-# The worker loads from the configured path
-./bin/worker --config config.yaml
 
-# Or add documents via CLI
+```bash
+# Via CLI
 ./bin/rag-cli knowledge add -type=runbook -title="High CPU" -file=runbooks/high-cpu.md
+
+# Via API
+curl -X POST http://localhost:8080/api/v1/knowledge/add \
+  -H "Content-Type: application/json" \
+  -d '{"type": "runbook", "title": "High CPU", "content": "..."}'
 ```
 
 ## Agent Capabilities
@@ -229,43 +547,62 @@ Load knowledge base:
 - Anomaly detection (frequency, new patterns)
 - Security concern detection
 
-## Workflows
+## Project Structure
 
-### ObservabilityAnalysisWorkflow
-Main workflow that orchestrates all agents in parallel:
-1. Fetch data from all sources (parallel)
-2. Run statistical analysis
-3. Get RAG context
-4. Perform LLM analysis
-5. Compile and return results
+```
+.
+├── cmd/
+│   ├── server/          # API server
+│   ├── worker/          # Temporal worker
+│   └── cli/             # Command-line interface
+├── pkg/
+│   ├── agents/          # Analysis agents (trace, metric, log)
+│   ├── collectors/      # Data source collectors
+│   ├── framework/       # Framework manager with feature flags
+│   ├── llm/             # LLM client and prompts
+│   ├── rag/             # RAG system (store, embedding)
+│   └── workflow/        # Temporal workflows
+├── internal/
+│   ├── config/          # Configuration with feature flags
+│   └── types/           # Core types
+├── helm/
+│   └── observability-analysis/  # Helm chart
+├── deploy/
+│   ├── kubernetes/      # Raw Kubernetes manifests
+│   ├── prometheus/      # Prometheus configuration
+│   ├── grafana/         # Grafana dashboards
+│   └── temporal/        # Temporal configuration
+├── Dockerfile           # Multi-stage Docker build
+├── docker-compose.yaml  # Full stack deployment
+├── Makefile             # Build and deployment commands
+├── config.example.yaml  # Example configuration
+└── README.md
+```
 
-### ContinuousMonitoringWorkflow
-Long-running workflow for continuous analysis:
-1. Execute analysis at intervals
-2. Check for critical findings
-3. Send notifications
-4. Repeat
+## Development
 
-### IncidentAnalysisWorkflow
-Deep-dive incident investigation:
-1. Extended time range analysis
-2. Correlation across all data sources
-3. Similar incident retrieval from RAG
-4. Detailed root cause analysis
+```bash
+# Install dev dependencies
+make dev-deps
 
-## Configuration Reference
+# Run tests
+make test
 
-See [config.example.yaml](config.example.yaml) for full configuration options.
+# Run with coverage
+make test-coverage
 
-| Section | Key Options |
-|---------|-------------|
-| `server` | Host, port, TLS settings |
-| `temporal` | Host, namespace, task queue |
-| `llm` | Provider, model, temperature |
-| `rag` | Vector store, embedding model |
-| `collectors` | Prometheus, Jaeger, Loki URLs |
-| `analysis` | Time ranges, thresholds |
-| `alerting` | Slack, PagerDuty webhooks |
+# Run benchmarks
+make bench
+
+# Lint code
+make lint
+
+# Format code
+make fmt
+
+# Tidy dependencies
+make tidy
+```
 
 ## Model Recommendations
 
@@ -275,61 +612,34 @@ See [config.example.yaml](config.example.yaml) for full configuration options.
 | Log Classification | Mistral-7B | Qwen2.5-7B |
 | Complex RCA | Qwen2.5-72B | GPT-4 |
 
-## Development
+## Make Targets
 
-```bash
-# Run tests
-go test ./...
+Run `make help` to see all available targets:
 
-# Run with race detector
-go test -race ./...
-
-# Build for production
-CGO_ENABLED=0 go build -o bin/server ./cmd/server
-CGO_ENABLED=0 go build -o bin/worker ./cmd/worker
-CGO_ENABLED=0 go build -o bin/rag-cli ./cmd/cli
 ```
+Build:
+  make build            - Build all binaries
+  make clean            - Clean build artifacts
+  make version          - Show version info
 
-## Docker Deployment
+Docker Compose:
+  make compose-up       - Start all services
+  make compose-down     - Stop all services
+  make compose-logs     - Follow logs
+  make compose-pull-models - Pull required LLM models
 
-```dockerfile
-# Dockerfile
-FROM golang:1.21-alpine AS builder
-WORKDIR /app
-COPY . .
-RUN go build -o server ./cmd/server
-RUN go build -o worker ./cmd/worker
+Helm:
+  make helm-install     - Install Helm release
+  make helm-upgrade     - Upgrade Helm release
+  make helm-uninstall   - Uninstall Helm release
 
-FROM alpine:latest
-COPY --from=builder /app/server /app/worker /usr/local/bin/
-CMD ["server"]
-```
+Kubernetes:
+  make deploy           - Deploy (raw manifests)
+  make k8s-port-forward - Port forward to service
 
-```yaml
-# docker-compose.yaml
-version: '3.8'
-services:
-  temporal:
-    image: temporalio/auto-setup:latest
-    ports:
-      - "7233:7233"
-
-  worker:
-    build: .
-    command: worker --config /config/config.yaml
-    volumes:
-      - ./config.yaml:/config/config.yaml
-      - ./knowledge:/knowledge
-    depends_on:
-      - temporal
-
-  server:
-    build: .
-    command: server --config /config/config.yaml
-    ports:
-      - "8080:8080"
-    depends_on:
-      - temporal
+API:
+  make health           - Check health endpoint
+  make features         - List enabled features
 ```
 
 ## Contributing

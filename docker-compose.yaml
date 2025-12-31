@@ -15,11 +15,18 @@ services:
       - POSTGRES_SEEDS=postgres
       - DYNAMIC_CONFIG_FILE_PATH=/etc/temporal/config/dynamicconfig/development.yaml
     depends_on:
-      - postgres
+      postgres:
+        condition: service_healthy
     volumes:
       - ./deploy/temporal/dynamicconfig:/etc/temporal/config/dynamicconfig
     networks:
       - observability
+    healthcheck:
+      test: ["CMD", "temporal", "workflow", "list", "--namespace", "default"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
 
   postgres:
     image: postgres:15-alpine
@@ -30,16 +37,22 @@ services:
       - postgres_data:/var/lib/postgresql/data
     networks:
       - observability
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U temporal"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   # Temporal UI
   temporal-ui:
     image: temporalio/ui:latest
     ports:
-      - "8080:8080"
+      - "8088:8080"
     environment:
       - TEMPORAL_ADDRESS=temporal:7233
     depends_on:
-      - temporal
+      temporal:
+        condition: service_healthy
     networks:
       - observability
 
@@ -53,6 +66,11 @@ services:
       - qdrant_data:/qdrant/storage
     networks:
       - observability
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:6333/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
 
   # Ollama for local LLM
   ollama:
@@ -70,14 +88,24 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
 
   # API Server
   server:
     build:
       context: .
       target: server
+      args:
+        - VERSION=${VERSION:-dev}
+        - COMMIT=${COMMIT:-unknown}
+        - BUILD_TIME=${BUILD_TIME:-unknown}
     ports:
-      - "8081:8080"
+      - "8080:8080"
     environment:
       - TEMPORAL_HOST=temporal:7233
       - LLM_BASE_URL=http://ollama:11434
@@ -86,21 +114,40 @@ services:
       - JAEGER_URL=http://jaeger:16686
       - LOKI_URL=http://loki:3100
     volumes:
-      - ./config.yaml:/app/config.yaml
+      - ./config.yaml:/app/config.yaml:ro
       - ./knowledge:/app/knowledge
     depends_on:
-      - temporal
-      - ollama
-      - qdrant
+      temporal:
+        condition: service_healthy
+      ollama:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
     networks:
       - observability
     restart: unless-stopped
+    # Graceful shutdown settings
+    stop_grace_period: 45s
+    stop_signal: SIGTERM
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    labels:
+      - "com.observability-analysis.component=server"
+      - "com.observability-analysis.version=${VERSION:-dev}"
 
   # Temporal Worker
   worker:
     build:
       context: .
       target: worker
+      args:
+        - VERSION=${VERSION:-dev}
+        - COMMIT=${COMMIT:-unknown}
+        - BUILD_TIME=${BUILD_TIME:-unknown}
     environment:
       - TEMPORAL_HOST=temporal:7233
       - LLM_BASE_URL=http://ollama:11434
@@ -109,17 +156,26 @@ services:
       - JAEGER_URL=http://jaeger:16686
       - LOKI_URL=http://loki:3100
     volumes:
-      - ./config.yaml:/app/config.yaml
+      - ./config.yaml:/app/config.yaml:ro
       - ./knowledge:/app/knowledge
     depends_on:
-      - temporal
-      - ollama
-      - qdrant
+      temporal:
+        condition: service_healthy
+      ollama:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
     networks:
       - observability
     restart: unless-stopped
+    # Graceful shutdown settings
+    stop_grace_period: 45s
+    stop_signal: SIGTERM
     deploy:
       replicas: 2
+    labels:
+      - "com.observability-analysis.component=worker"
+      - "com.observability-analysis.version=${VERSION:-dev}"
 
   # Observability stack (optional - for testing)
   prometheus:
@@ -127,10 +183,15 @@ services:
     ports:
       - "9090:9090"
     volumes:
-      - ./deploy/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+      - ./deploy/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus_data:/prometheus
     networks:
       - observability
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:9090/-/healthy"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
 
   jaeger:
     image: jaegertracing/all-in-one:latest
@@ -142,6 +203,11 @@ services:
       - COLLECTOR_OTLP_ENABLED=true
     networks:
       - observability
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:14269/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
 
   loki:
     image: grafana/loki:latest
@@ -151,6 +217,11 @@ services:
       - loki_data:/loki
     networks:
       - observability
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:3100/ready"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
 
   grafana:
     image: grafana/grafana:latest
@@ -160,13 +231,18 @@ services:
       - GF_SECURITY_ADMIN_PASSWORD=admin
     volumes:
       - grafana_data:/var/lib/grafana
-      - ./deploy/grafana/provisioning:/etc/grafana/provisioning
+      - ./deploy/grafana/provisioning:/etc/grafana/provisioning:ro
     depends_on:
       - prometheus
       - loki
       - jaeger
     networks:
       - observability
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:3000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
 
 networks:
   observability:
