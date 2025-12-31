@@ -1,0 +1,129 @@
+# Observability Analysis Framework Configuration
+
+server:
+  host: "0.0.0.0"
+  port: 8080
+  read_timeout: 30s
+  write_timeout: 30s
+  enable_tls: false
+  # tls_cert_file: "/path/to/cert.pem"
+  # tls_key_file: "/path/to/key.pem"
+
+temporal:
+  host_port: "localhost:7233"
+  namespace: "default"
+  task_queue: "observability-analysis"
+  worker_count: 4
+  max_concurrent: 10
+  enable_tls: false
+
+llm:
+  provider: "ollama"  # ollama, openai, anthropic, deepseek
+  default_model: "qwen2.5:32b"
+  base_url: "http://localhost:11434"
+  # api_key: ""  # Required for OpenAI, Anthropic, DeepSeek
+  timeout: 5m
+  max_retries: 3
+  temperature: 0.1
+  max_tokens: 4096
+  rate_limit_rpm: 60
+
+  # Optional: Configure multiple models for different use cases
+  models:
+    - name: "trace-analyzer"
+      provider: "ollama"
+      model: "qwen2.5:32b"
+      base_url: "http://localhost:11434"
+      temperature: 0.1
+      max_tokens: 4096
+      use_cases: ["trace"]
+
+    - name: "log-analyzer"
+      provider: "ollama"
+      model: "mistral:7b"
+      base_url: "http://localhost:11434"
+      temperature: 0.1
+      max_tokens: 2048
+      use_cases: ["log"]
+
+rag:
+  vector_store:
+    type: "memory"  # memory, qdrant, weaviate, pinecone, pgvector
+    # host: "localhost"
+    # port: 6333
+    collection: "observability"
+    dimension: 768
+
+  embedding_model: "nomic-embed-text"
+  embedding_dim: 768
+  chunk_size: 1000
+  chunk_overlap: 200
+  top_k: 5
+  min_score: 0.7
+  knowledge_base_path: "./knowledge"
+  auto_sync: true
+  sync_interval: 5m
+
+collectors:
+  prometheus:
+    enabled: true
+    url: "http://localhost:9090"
+    timeout: 30s
+    # username: ""
+    # password: ""
+
+  jaeger:
+    enabled: true
+    query_url: "http://localhost:16686"
+    # grpc_address: "localhost:14250"
+    timeout: 30s
+
+  tempo:
+    enabled: false
+    url: "http://localhost:3200"
+    # grpc_address: "localhost:9095"
+    timeout: 30s
+
+  loki:
+    enabled: true
+    url: "http://localhost:3100"
+    timeout: 30s
+    # username: ""
+    # password: ""
+
+  otel:
+    enabled: false
+    grpc_endpoint: "localhost:4317"
+    http_endpoint: "localhost:4318"
+
+analysis:
+  default_time_range: 1h
+  max_traces: 1000
+  max_logs: 10000
+  anomaly_threshold: 3.0
+  forecasting:
+    enabled: true
+    horizon: 24h
+    min_data_points: 100
+    confidence_level: 0.95
+
+alerting:
+  enabled: false
+  slack:
+    enabled: false
+    webhook_url: ""
+    channel: "#alerts"
+  pagerduty:
+    enabled: false
+    routing_key: ""
+    service_key: ""
+  webhook:
+    enabled: false
+    url: ""
+    headers: {}
+
+logging:
+  level: "info"  # debug, info, warn, error
+  format: "json"  # json, text
+  output: "stdout"  # stdout, file
+  # file: "/var/log/observability-analysis.log"
