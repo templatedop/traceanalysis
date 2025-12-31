@@ -50,13 +50,16 @@ type FeaturesConfig struct {
 
 // ServerConfig contains HTTP server settings
 type ServerConfig struct {
-	Host         string        `yaml:"host"`
-	Port         int           `yaml:"port"`
-	ReadTimeout  time.Duration `yaml:"read_timeout"`
-	WriteTimeout time.Duration `yaml:"write_timeout"`
-	EnableTLS    bool          `yaml:"enable_tls"`
-	TLSCertFile  string        `yaml:"tls_cert_file"`
-	TLSKeyFile   string        `yaml:"tls_key_file"`
+	Host            string        `yaml:"host"`
+	Port            int           `yaml:"port"`
+	ReadTimeout     time.Duration `yaml:"read_timeout"`
+	WriteTimeout    time.Duration `yaml:"write_timeout"`
+	IdleTimeout     time.Duration `yaml:"idle_timeout"`
+	ShutdownTimeout time.Duration `yaml:"shutdown_timeout"`
+	DrainTimeout    time.Duration `yaml:"drain_timeout"`
+	EnableTLS       bool          `yaml:"enable_tls"`
+	TLSCertFile     string        `yaml:"tls_cert_file"`
+	TLSKeyFile      string        `yaml:"tls_key_file"`
 }
 
 // TemporalConfig contains Temporal workflow settings
@@ -267,10 +270,13 @@ type LoggingConfig struct {
 func DefaultConfig() *Config {
 	return &Config{
 		Server: ServerConfig{
-			Host:         "0.0.0.0",
-			Port:         8080,
-			ReadTimeout:  30 * time.Second,
-			WriteTimeout: 30 * time.Second,
+			Host:            "0.0.0.0",
+			Port:            8080,
+			ReadTimeout:     30 * time.Second,
+			WriteTimeout:    30 * time.Second,
+			IdleTimeout:     120 * time.Second,
+			ShutdownTimeout: 30 * time.Second,
+			DrainTimeout:    10 * time.Second,
 		},
 		Features: FeaturesConfig{
 			EnableTemporal:    true,

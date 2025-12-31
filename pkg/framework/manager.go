@@ -265,15 +265,99 @@ func (m *Manager) Shutdown(ctx context.Context) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	if !m.initialized {
+		return nil
+	}
+
 	log.Println("Shutting down framework...")
 
+	var errs []error
+
+	// Shutdown Temporal client first to stop accepting new workflows
 	if m.workflowClient != nil {
+		log.Println("Closing Temporal client...")
 		m.workflowClient.Close()
+		m.workflowClient = nil
+	}
+
+	// Clear agents (they don't have explicit close methods)
+	if m.traceAgent != nil {
+		log.Println("Stopping trace agent...")
+		m.traceAgent = nil
+	}
+	if m.metricAgent != nil {
+		log.Println("Stopping metric agent...")
+		m.metricAgent = nil
+	}
+	if m.logAgent != nil {
+		log.Println("Stopping log agent...")
+		m.logAgent = nil
+	}
+
+	// Clear collectors (they don't have explicit close methods)
+	if m.prometheusCollector != nil {
+		log.Println("Closing Prometheus collector...")
+		m.prometheusCollector = nil
+	}
+	if m.jaegerCollector != nil {
+		log.Println("Closing Jaeger collector...")
+		m.jaegerCollector = nil
+	}
+	if m.lokiCollector != nil {
+		log.Println("Closing Loki collector...")
+		m.lokiCollector = nil
+	}
+
+	// Clear RAG components
+	if m.ragStore != nil {
+		log.Println("Closing RAG store...")
+		// Check if store implements io.Closer
+		if closer, ok := m.ragStore.(interface{ Close() error }); ok {
+			if err := closer.Close(); err != nil {
+				errs = append(errs, fmt.Errorf("failed to close RAG store: %w", err))
+			}
+		}
+		m.ragStore = nil
+	}
+	if m.knowledgeBase != nil {
+		m.knowledgeBase = nil
+	}
+
+	// Clear cache (cleanup routine stops when context is cancelled)
+	if m.cache != nil {
+		log.Println("Stopping LLM cache...")
+		m.cache = nil
+		m.cachedClient = nil
+	}
+
+	// Clear alert manager
+	if m.alertManager != nil {
+		log.Println("Stopping alert manager...")
+		m.alertManager = nil
+	}
+
+	// Clear LLM client
+	if m.llmClient != nil {
+		log.Println("Closing LLM client...")
+		m.llmClient = nil
 	}
 
 	m.initialized = false
+
+	if len(errs) > 0 {
+		log.Printf("Framework shutdown completed with %d errors", len(errs))
+		return fmt.Errorf("shutdown errors: %v", errs)
+	}
+
 	log.Println("Framework shutdown complete")
 	return nil
+}
+
+// IsInitialized returns whether the framework is initialized
+func (m *Manager) IsInitialized() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.initialized
 }
 
 // Analyze performs analysis using the configured components

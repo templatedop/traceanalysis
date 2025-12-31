@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -53,35 +55,77 @@ func main() {
 	// Create server
 	server := NewServer(cfg, manager)
 
+	// Start server in a goroutine
+	serverErr := make(chan error, 1)
+	go func() {
+		addr := fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port)
+		log.Printf("Starting server on %s", addr)
+		log.Printf("Enabled features: %v", cfg.GetEnabledFeatures())
+		log.Printf("Enabled agents: %v", cfg.GetEnabledAgents())
+		log.Printf("Enabled collectors: %v", cfg.GetEnabledCollectors())
+
+		if err := server.Start(addr); err != nil && err != http.ErrServerClosed {
+			serverErr <- err
+		}
+		close(serverErr)
+	}()
+
 	// Handle shutdown gracefully
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
-	go func() {
-		<-sigChan
-		log.Println("Shutting down...")
-		cancel()
-		manager.Shutdown(context.Background())
-		server.Shutdown(context.Background())
-	}()
-
-	// Start server
-	addr := fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port)
-	log.Printf("Starting server on %s", addr)
-	log.Printf("Enabled features: %v", cfg.GetEnabledFeatures())
-	log.Printf("Enabled agents: %v", cfg.GetEnabledAgents())
-	log.Printf("Enabled collectors: %v", cfg.GetEnabledCollectors())
-
-	if err := server.Start(addr); err != nil && err != http.ErrServerClosed {
+	select {
+	case sig := <-sigChan:
+		log.Printf("Received signal %v, initiating graceful shutdown...", sig)
+	case err := <-serverErr:
 		log.Fatalf("Server error: %v", err)
 	}
+
+	// Cancel context to signal all goroutines
+	cancel()
+
+	// Create shutdown context with timeout
+	shutdownTimeout := cfg.Server.ShutdownTimeout
+	if shutdownTimeout == 0 {
+		shutdownTimeout = 30 * time.Second
+	}
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), shutdownTimeout)
+	defer shutdownCancel()
+
+	// Signal server to stop accepting new requests
+	server.SetShuttingDown(true)
+	log.Println("Stopped accepting new requests")
+
+	// Wait for drain timeout to allow in-flight requests to complete
+	drainTimeout := cfg.Server.DrainTimeout
+	if drainTimeout == 0 {
+		drainTimeout = 10 * time.Second
+	}
+	log.Printf("Waiting %v for in-flight requests to complete...", drainTimeout)
+	time.Sleep(drainTimeout)
+
+	// Shutdown HTTP server
+	log.Println("Shutting down HTTP server...")
+	if err := server.Shutdown(shutdownCtx); err != nil {
+		log.Printf("HTTP server shutdown error: %v", err)
+	}
+
+	// Shutdown framework components
+	log.Println("Shutting down framework components...")
+	if err := manager.Shutdown(shutdownCtx); err != nil {
+		log.Printf("Framework shutdown error: %v", err)
+	}
+
+	log.Println("Graceful shutdown complete")
 }
 
 // Server represents the API server
 type Server struct {
-	config     *config.Config
-	httpServer *http.Server
-	manager    *framework.Manager
+	config       *config.Config
+	httpServer   *http.Server
+	manager      *framework.Manager
+	shuttingDown atomic.Bool
+	activeReqs   sync.WaitGroup
 }
 
 // NewServer creates a new API server
@@ -95,13 +139,66 @@ func NewServer(cfg *config.Config, manager *framework.Manager) *Server {
 	mux := http.NewServeMux()
 	server.registerRoutes(mux)
 
+	// Wrap with graceful shutdown middleware
+	handler := server.gracefulShutdownMiddleware(mux)
+
 	server.httpServer = &http.Server{
-		Handler:      mux,
+		Handler:      handler,
 		ReadTimeout:  cfg.Server.ReadTimeout,
 		WriteTimeout: cfg.Server.WriteTimeout,
+		IdleTimeout:  cfg.Server.IdleTimeout,
 	}
 
 	return server
+}
+
+// gracefulShutdownMiddleware wraps the handler to track in-flight requests
+// and reject new requests during shutdown
+func (s *Server) gracefulShutdownMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Check if we're shutting down
+		if s.shuttingDown.Load() {
+			// Still allow health and ready endpoints during shutdown
+			if r.URL.Path != "/health" && r.URL.Path != "/ready" {
+				w.Header().Set("Connection", "close")
+				http.Error(w, "Server is shutting down", http.StatusServiceUnavailable)
+				return
+			}
+		}
+
+		// Track this request
+		s.activeReqs.Add(1)
+		defer s.activeReqs.Done()
+
+		// Call the actual handler
+		next.ServeHTTP(w, r)
+	})
+}
+
+// SetShuttingDown sets the server's shutdown state
+func (s *Server) SetShuttingDown(shutting bool) {
+	s.shuttingDown.Store(shutting)
+}
+
+// IsShuttingDown returns whether the server is shutting down
+func (s *Server) IsShuttingDown() bool {
+	return s.shuttingDown.Load()
+}
+
+// WaitForActiveRequests waits for all active requests to complete with a timeout
+func (s *Server) WaitForActiveRequests(timeout time.Duration) bool {
+	done := make(chan struct{})
+	go func() {
+		s.activeReqs.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		return true
+	case <-time.After(timeout):
+		return false
+	}
 }
 
 // Start starts the HTTP server
@@ -153,17 +250,33 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	health := s.manager.Health(r.Context())
+	// Add shutdown status to health
+	health["shutting_down"] = s.shuttingDown.Load()
+
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
+	if s.shuttingDown.Load() {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	} else {
+		w.WriteHeader(http.StatusOK)
+	}
 	json.NewEncoder(w).Encode(health)
 }
 
 func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
+	// Not ready if shutting down
+	if s.shuttingDown.Load() {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		json.NewEncoder(w).Encode(map[string]string{"status": "shutting_down"})
+		return
+	}
+
 	health := s.manager.Health(r.Context())
 	if !health["initialized"].(bool) {
 		http.Error(w, "Not ready", http.StatusServiceUnavailable)
 		return
 	}
+	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(map[string]string{"status": "ready"})
 }
